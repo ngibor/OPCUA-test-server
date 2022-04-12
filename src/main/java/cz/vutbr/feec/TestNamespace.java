@@ -33,6 +33,8 @@ import static org.eclipse.milo.opcua.stack.core.types.builtin.unsigned.Unsigned.
 
 public class TestNamespace extends ManagedNamespaceWithLifecycle {
 
+    public static final String DYNAMIC_NODE_ID = "HelloWorld/DataAccess/AnalogValue";
+
     public static final String NAMESPACE_URI = "urn:test-server";
 
     private final Logger logger = LoggerFactory.getLogger(getClass());

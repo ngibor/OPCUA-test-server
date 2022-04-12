@@ -1,21 +1,14 @@
 package cz.vutbr.feec;
 
-import com.google.common.collect.Sets;
-import org.eclipse.milo.opcua.sdk.server.util.HostnameUtil;
-import org.eclipse.milo.opcua.stack.core.util.SelfSignedCertificateBuilder;
-import org.eclipse.milo.opcua.stack.core.util.SelfSignedCertificateGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.nio.file.Path;
 import java.security.*;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
-import java.util.Set;
-import java.util.UUID;
 import java.util.regex.Pattern;
 
 class KeyStoreLoader {
@@ -23,8 +16,8 @@ class KeyStoreLoader {
     private static final Pattern IP_ADDR_PATTERN = Pattern.compile(
             "^(([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.){3}([01]?\\d\\d?|2[0-4]\\d|25[0-5])$");
 
-    private static final String SERVER_ALIAS = "server-ai";
-    private static final char[] PASSWORD = "password".toCharArray();
+    private static final String SERVER_ALIAS = "server";
+    private static final char[] PASSWORD = "secret".toCharArray();
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
@@ -35,47 +28,10 @@ class KeyStoreLoader {
     KeyStoreLoader load(Path baseDir) throws Exception {
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
 
-        File serverKeyStore = baseDir.resolve("example-server.pfx").toFile();
+        File serverKeyStore = baseDir.resolve("keystore.pkcs12").toFile();
 
         logger.info("Loading KeyStore at {}", serverKeyStore);
-
-        if (!serverKeyStore.exists()) {
-            keyStore.load(null, PASSWORD);
-
-            KeyPair keyPair = SelfSignedCertificateGenerator.generateRsaKeyPair(2048);
-
-            String applicationUri = "urn:eclipse:milo:examples:server:" + UUID.randomUUID();
-
-            SelfSignedCertificateBuilder builder = new SelfSignedCertificateBuilder(keyPair)
-                    .setCommonName("Eclipse Milo Example Server")
-                    .setOrganization("digitalpetri")
-                    .setOrganizationalUnit("dev")
-                    .setLocalityName("Folsom")
-                    .setStateName("CA")
-                    .setCountryCode("US")
-                    .setApplicationUri(applicationUri);
-
-            // Get as many hostnames and IP addresses as we can listed in the certificate.
-            Set<String> hostnames = Sets.union(
-                    Sets.newHashSet(HostnameUtil.getHostname()),
-                    HostnameUtil.getHostnames("0.0.0.0", false)
-            );
-
-            for (String hostname : hostnames) {
-                if (IP_ADDR_PATTERN.matcher(hostname).matches()) {
-                    builder.addIpAddress(hostname);
-                } else {
-                    builder.addDnsName(hostname);
-                }
-            }
-
-            X509Certificate certificate = builder.build();
-
-            keyStore.setKeyEntry(SERVER_ALIAS, keyPair.getPrivate(), PASSWORD, new X509Certificate[]{certificate});
-            keyStore.store(new FileOutputStream(serverKeyStore), PASSWORD);
-        } else {
-            keyStore.load(new FileInputStream(serverKeyStore), PASSWORD);
-        }
+        keyStore.load(new FileInputStream(serverKeyStore), PASSWORD);
 
         Key serverPrivateKey = keyStore.getKey(SERVER_ALIAS, PASSWORD);
         if (serverPrivateKey instanceof PrivateKey) {
@@ -90,10 +46,6 @@ class KeyStoreLoader {
         }
 
         return this;
-    }
-
-    X509Certificate getServerCertificate() {
-        return serverCertificate;
     }
 
     public X509Certificate[] getServerCertificateChain() {

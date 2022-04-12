@@ -1,5 +1,9 @@
 package cz.vutbr.feec;
 
+import org.bouncycastle.asn1.ASN1InputStream;
+import org.bouncycastle.asn1.DERSequence;
+import org.bouncycastle.asn1.DERTaggedObject;
+import org.bouncycastle.asn1.DERUTF8String;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.eclipse.milo.opcua.sdk.client.OpcUaClient;
 import org.eclipse.milo.opcua.sdk.client.nodes.UaVariableNode;
@@ -29,17 +33,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.UnsupportedEncodingException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.KeyPair;
+import java.security.PrivateKey;
 import java.security.Security;
 import java.security.cert.X509Certificate;
 import java.text.DecimalFormat;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Random;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -47,6 +50,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 
 import static com.google.common.collect.Lists.newArrayList;
+import static org.bouncycastle.asn1.isismtt.ocsp.RequestedCertificate.certificate;
 import static org.eclipse.milo.opcua.sdk.server.api.config.OpcUaServerConfig.*;
 import static org.eclipse.milo.opcua.stack.core.types.builtin.unsigned.Unsigned.uint;
 
@@ -80,63 +84,39 @@ public class OPCUAServer {
         final CompletableFuture<Void> future = new CompletableFuture<>();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> future.complete(null)));
 
+        // Start new client thread that will update TestNamespace.DYNAMIC_NODE_ID value to random value every 10 seconds
+        new Thread(() -> {
+            try {
+                OpcUaClient client = OpcUaClient.create(
+                        "opc.tcp://ubuntu:12686/milo",
+                        endpoints ->
+                                endpoints.stream()
+                                        .findFirst(),
+                        configBuilder ->
+                                configBuilder
+                                        .setApplicationName(LocalizedText.english("Server's client"))
+                                        .setApplicationUri("urn:eclipse:milo:servers:client")
+                                        .setRequestTimeout(uint(5000))
+                                        .build()
+                );
+                client.connect().get();
 
-        Thread clientThread = new Thread() {
-            public void run() {
-                try {
+                Random r = new Random();
+                while (true) {
+                    double randomValue = 15 * r.nextDouble();
+                    DecimalFormat df = new DecimalFormat("#.##");
+                    randomValue = Double.valueOf(df.format(randomValue));
 
-                    OpcUaClient client = OpcUaClient.create(
-                            "opc.tcp://ubuntu:12686/milo",
-                            endpoints ->
-                                    endpoints.stream()
-                                            .filter(endpointFilter())
-                                            .findFirst(),
-                            configBuilder ->
-                                    configBuilder
-                                            .setApplicationName(LocalizedText.english("eclipse milo opc-ua client"))
-                                            .setApplicationUri("urn:eclipse:milo:examples:client")
-                                            .setRequestTimeout(uint(5000))
-                                            .build()
-                    );
-                    client.connect().get();
-
-                    try {
-
-                        log.info("namespace index table {}", client.getNamespaceTable());
-                        for (String s : client.getNamespaceTable().toArray()) {
-                            log.info("namespace: {}", s);
-                            log.info("\t index: {}", client.getNamespaceTable().getIndex(s));
-                        }
-//                        log.info("namespace index table {}", client.getNamespaceTable().getIndex("opc.tcp://ubuntu:12686/milo"));
-                    } catch (Exception e) {
-                        log.info("fuck yooou");
-                    }
-                    Random r = new Random();
-                    while (true) {
-                        UaVariableNode node = client.getAddressSpace().getVariableNode(new NodeId(2, "HelloWorld/DataAccess/AnalogValue"));
-                        DataValue value = node.readValue();
-//                        log.info(value.toString());
-
-                        double randomValue = 15 * r.nextDouble();
-                        DecimalFormat df = new DecimalFormat("#.##");
-                        randomValue = Double.valueOf(df.format(randomValue));
-                        Variant variant = new Variant(randomValue);
-                        DataValue dv = new DataValue(variant, null, null);
-                        client.writeValue(new NodeId(2, "HelloWorld/DataAccess/AnalogValue"), dv);
-                        Thread.sleep(10000);
-                    }
-                } catch (Exception e) {
-                    log.error("EXCEPTION IN CLIENT THREAD:" + e.getMessage());
+                    Variant variant = new Variant(randomValue);
+                    DataValue dv = new DataValue(variant, null, null);
+                    client.writeValue(new NodeId(2, TestNamespace.DYNAMIC_NODE_ID), dv);
+                    Thread.sleep(10000);
                 }
+            } catch (Exception e) {
+                log.error("EXCEPTION IN CLIENT THREAD:" + e.getMessage());
             }
-        };
-        clientThread.start();
+        }).start();
 
-//        node = client.getAddressSpace().getVariableNode(new NodeId(2,"HelloWorld/DataAccess/AnalogValue"));
-//        value = node.readValue();
-//        log.info(value.toString());
-
-//        client.writeValue(new NodeId(2,"HelloWorld/Dynamic/Double"), new DataValue(new Variant(2.0)));
         future.get();
     }
 
@@ -144,36 +124,18 @@ public class OPCUAServer {
     private final TestNamespace exampleNamespace;
 
     public OPCUAServer() throws Exception {
-        Path securityTempDir = Paths.get(System.getProperty("java.io.tmpdir"), "server", "security");
-        Files.createDirectories(securityTempDir);
-        if (!Files.exists(securityTempDir)) {
-            throw new Exception("unable to create security temp dir: " + securityTempDir);
-        }
-
-        File pkiDir = securityTempDir.resolve("pki").toFile();
-
-
-        log.info("security dir: {}", securityTempDir.toAbsolutePath());
-        log.info("security pki dir: {}", pkiDir.getAbsolutePath());
-
-        KeyStoreLoader loader = new KeyStoreLoader().load(securityTempDir);
+        ClassLoader classLoader = getClass().getClassLoader();
+        File file = new File(classLoader.getResource("certificates").getPath());
+        KeyStoreLoader loader = new KeyStoreLoader().load(file.toPath());
 
         DefaultCertificateManager certificateManager = new DefaultCertificateManager(
                 loader.getServerKeyPair(),
                 loader.getServerCertificateChain()
         );
 
-        DefaultTrustListManager trustListManager = new DefaultTrustListManager(pkiDir);
-
+        DefaultTrustListManager trustListManager = new DefaultTrustListManager(file);
         DefaultServerCertificateValidator certificateValidator =
                 new DefaultServerCertificateValidator(trustListManager);
-
-        KeyPair httpsKeyPair = SelfSignedCertificateGenerator.generateRsaKeyPair(2048);
-
-        SelfSignedHttpsCertificateBuilder httpsCertificateBuilder = new SelfSignedHttpsCertificateBuilder(httpsKeyPair);
-        httpsCertificateBuilder.setCommonName(HostnameUtil.getHostname());
-        HostnameUtil.getHostnames("0.0.0.0").forEach(httpsCertificateBuilder::addDnsName);
-        X509Certificate httpsCertificate = httpsCertificateBuilder.build();
 
         UsernameIdentityValidator identityValidator = new UsernameIdentityValidator(
                 true,
@@ -191,19 +153,34 @@ public class OPCUAServer {
         X509IdentityValidator x509IdentityValidator = new X509IdentityValidator(c -> true);
 
         // If you need to use multiple certificates you'll have to be smarter than this.
-        X509Certificate certificate = certificateManager.getCertificates()
+        X509Certificate httpsCertificate = certificateManager.getCertificates()
                 .stream()
                 .findFirst()
                 .orElseThrow(() -> new UaRuntimeException(StatusCodes.Bad_ConfigurationError, "no certificate found"));
 
-        // The configured application URI must match the one in the certificate(s)
-        String applicationUri = CertificateUtil
-                .getSanUri(certificate)
-                .orElseThrow(() -> new UaRuntimeException(
-                        StatusCodes.Bad_ConfigurationError,
-                        "certificate is missing the application URI"));
+        KeyPair httpsKeyPair = certificateManager.getKeyPairs()
+                .stream()
+                .findFirst()
+                .orElseThrow(() -> new UaRuntimeException(StatusCodes.Bad_ConfigurationError, "no keypair"));
 
-        Set<EndpointConfiguration> endpointConfigurations = createEndpointConfigurations(certificate);
+
+        String applicationUri = "";
+        Collection<List<?>> altNames = httpsCertificate.getSubjectAlternativeNames();
+        if (altNames == null) {
+            throw new UaRuntimeException(StatusCodes.Bad_ConfigurationError, "certificate is missing the application URI");
+        }
+
+        for (List item : altNames) {
+            Integer type = (Integer) item.get(0);
+            // 8.3.2.1 https://www.itu.int/rec/dologin_pub.asp?lang=e&id=T-REC-X.509-201210-S!!PDF-E&type=items
+            if (type == 2) {
+                applicationUri = ((String) item.toArray()[1]);
+            } else {
+                throw new UaRuntimeException(StatusCodes.Bad_ConfigurationError, "certificate SubjectAltName has invalid format");
+            }
+        }
+
+        Set<EndpointConfiguration> endpointConfigurations = createEndpointConfigurations(httpsCertificate);
 
         OpcUaServerConfig serverConfig = OpcUaServerConfig.builder()
                 .setApplicationUri(applicationUri)
@@ -240,7 +217,8 @@ public class OPCUAServer {
 
         Set<String> hostnames = new LinkedHashSet<>();
         hostnames.add(HostnameUtil.getHostname());
-        hostnames.addAll(HostnameUtil.getHostnames("0.0.0.0"));
+//        hostnames.addAll(HostnameUtil.getHostnames("0.0.0.0"));
+
 
         for (String bindAddress : bindAddresses) {
             for (String hostname : hostnames) {
@@ -277,7 +255,7 @@ public class OPCUAServer {
                 );
 
                 /*
-                 * It's good practice to provide a discovery-specific endpoint with no security.
+                 * It's good practice providing a discovery-specific endpoint with no security.
                  * It's required practice if all regular endpoints have security configured.
                  *
                  * Usage of the  "/discovery" suffix is defined by OPC UA Part 6:
