@@ -1,6 +1,5 @@
 package cz.vutbr.feec;
 
-import org.eclipse.milo.opcua.sdk.core.AccessLevel;
 import org.eclipse.milo.opcua.sdk.core.Reference;
 import org.eclipse.milo.opcua.sdk.server.Lifecycle;
 import org.eclipse.milo.opcua.sdk.server.OpcUaServer;
@@ -13,9 +12,7 @@ import org.eclipse.milo.opcua.sdk.server.model.nodes.objects.ServerTypeNode;
 import org.eclipse.milo.opcua.sdk.server.model.nodes.variables.AnalogItemTypeNode;
 import org.eclipse.milo.opcua.sdk.server.nodes.UaFolderNode;
 import org.eclipse.milo.opcua.sdk.server.nodes.UaNode;
-import org.eclipse.milo.opcua.sdk.server.nodes.UaVariableNode;
 import org.eclipse.milo.opcua.sdk.server.nodes.factories.NodeFactory;
-import org.eclipse.milo.opcua.sdk.server.nodes.filters.AttributeFilters;
 import org.eclipse.milo.opcua.sdk.server.util.SubscriptionModel;
 import org.eclipse.milo.opcua.stack.core.Identifiers;
 import org.eclipse.milo.opcua.stack.core.UaException;
@@ -26,14 +23,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
-import java.util.Random;
 import java.util.UUID;
 
 import static org.eclipse.milo.opcua.stack.core.types.builtin.unsigned.Unsigned.*;
 
 public class TestNamespace extends ManagedNamespaceWithLifecycle {
 
-    public static final String DYNAMIC_NODE_ID = "HelloWorld/DataAccess/AnalogValue";
+    public static final String CHANGING_NODE = "Test/DataAccess/Changing";
+    public static final String STATIC_NODE = "Test/DataAccess/Static";
 
     public static final String NAMESPACE_URI = "urn:test-server";
 
@@ -42,7 +39,6 @@ public class TestNamespace extends ManagedNamespaceWithLifecycle {
     private volatile Thread eventThread;
     private volatile boolean keepPostingEvents = true;
 
-    private final Random random = new Random();
 
     private final DataTypeDictionaryManager dictionaryManager;
 
@@ -81,13 +77,13 @@ public class TestNamespace extends ManagedNamespaceWithLifecycle {
 
     private void createAndAddNodes() {
         // Create a "HelloWorld" folder and add it to the node manager
-        NodeId folderNodeId = newNodeId("HelloWorld");
+        NodeId folderNodeId = newNodeId("Test");
 
         UaFolderNode folderNode = new UaFolderNode(
                 getNodeContext(),
                 folderNodeId,
-                newQualifiedName("HelloWorld"),
-                LocalizedText.english("HelloWorld")
+                newQualifiedName("Test"),
+                LocalizedText.english("Test")
         );
 
         getNodeManager().addNode(folderNode);
@@ -100,8 +96,83 @@ public class TestNamespace extends ManagedNamespaceWithLifecycle {
                 false
         ));
 
-        // Add the rest of the nodes
-        addVariableNodes(folderNode);
+        // Add nodes
+        addDataAccessNodes(folderNode);
+
+    }
+
+    private void addDataAccessNodes(UaFolderNode rootNode) {
+        // DataAccess folder
+        UaFolderNode dataAccessFolder = new UaFolderNode(
+                getNodeContext(),
+                newNodeId("Test/DataAccess"),
+                newQualifiedName("DataAccess"),
+                LocalizedText.english("DataAccess")
+        );
+
+        getNodeManager().addNode(dataAccessFolder);
+        rootNode.addOrganizes(dataAccessFolder);
+
+        try {
+            AnalogItemTypeNode node = (AnalogItemTypeNode) getNodeFactory().createNode(
+                    newNodeId(CHANGING_NODE),
+                    Identifiers.AnalogItemType,
+                    new NodeFactory.InstantiationCallback() {
+                        @Override
+                        public boolean includeOptionalNode(NodeId typeDefinitionId, QualifiedName browseName) {
+                            return true;
+                        }
+                    }
+            );
+            node.getFilterChain().addLast(new AttributeLoggingFilter());
+            node.setBrowseName(newQualifiedName("AnalogValue"));
+            node.setDisplayName(LocalizedText.english("AnalogValue"));
+            node.setDataType(Identifiers.Double);
+            node.setValue(new DataValue(new Variant(3.14d)));
+            node.setAccessLevel(UByte.MAX);
+            node.setUserAccessLevel(UByte.MAX);
+
+            node.setEURange(new Range(0.0, 100.0));
+
+            getNodeManager().addNode(node);
+            dataAccessFolder.addOrganizes(node);
+
+            node.addReference(new Reference(
+                    node.getNodeId(),
+                    Identifiers.Organizes,
+                    Identifiers.ObjectNode.expanded(),
+                    false));
+
+
+            node = (AnalogItemTypeNode) getNodeFactory().createNode(
+                    newNodeId(STATIC_NODE),
+                    Identifiers.AnalogItemType,
+                    new NodeFactory.InstantiationCallback() {
+                        @Override
+                        public boolean includeOptionalNode(NodeId typeDefinitionId, QualifiedName browseName) {
+                            return true;
+                        }
+                    }
+            );
+            node.getFilterChain().addLast(new AttributeLoggingFilter());
+            node.setBrowseName(newQualifiedName("AnalogValue"));
+            node.setDisplayName(LocalizedText.english("AnalogValue"));
+            node.setDataType(Identifiers.String);
+            node.setValue(new DataValue(new Variant("Default")));
+            node.setAccessLevel(UByte.MAX);
+            node.setUserAccessLevel(UByte.MAX);
+
+            getNodeManager().addNode(node);
+            dataAccessFolder.addOrganizes(node);
+
+            node.addReference(new Reference(
+                    node.getNodeId(),
+                    Identifiers.Organizes,
+                    Identifiers.ObjectNode.expanded(),
+                    false));
+        } catch (UaException e) {
+            logger.error("Error creating AnalogItemType instance: {}", e.getMessage(), e);
+        }
 
     }
 
@@ -153,94 +224,6 @@ public class TestNamespace extends ManagedNamespaceWithLifecycle {
             }, "bogus-event-poster");
 
             eventThread.start();
-        }
-    }
-
-    private void addVariableNodes(UaFolderNode rootNode) {
-//        addDynamicNodes(rootNode);
-        addDataAccessNodes(rootNode);
-    }
-
-
-    private void addDynamicNodes(UaFolderNode rootNode) {
-        UaFolderNode dynamicFolder = new UaFolderNode(
-                getNodeContext(),
-                newNodeId("HelloWorld/Dynamic"),
-                newQualifiedName("Dynamic"),
-                LocalizedText.english("Dynamic")
-        );
-
-        getNodeManager().addNode(dynamicFolder);
-        rootNode.addOrganizes(dynamicFolder);
-
-
-        // Dynamic Double
-        {
-            String name = "Double";
-            NodeId typeId = Identifiers.Double;
-            Variant variant = new Variant(228);
-
-            UaVariableNode node = new UaVariableNode.UaVariableNodeBuilder(getNodeContext())
-                    .setNodeId(newNodeId("HelloWorld/Dynamic/" + name))
-                    .setAccessLevel(AccessLevel.READ_WRITE)
-                    .setBrowseName(newQualifiedName(name))
-                    .setDisplayName(LocalizedText.english(name))
-                    .setDataType(typeId)
-                    .setTypeDefinition(Identifiers.BaseDataVariableType)
-                    .build();
-
-            node.setValue(new DataValue(variant));
-
-            node.getFilterChain().addLast(
-                    new AttributeLoggingFilter(),
-                    AttributeFilters.getValue(
-                            ctx ->
-                                    new DataValue(new Variant(220.0))
-                    )
-            );
-
-            getNodeManager().addNode(node);
-            dynamicFolder.addOrganizes(node);
-        }
-    }
-
-    private void addDataAccessNodes(UaFolderNode rootNode) {
-        // DataAccess folder
-        UaFolderNode dataAccessFolder = new UaFolderNode(
-                getNodeContext(),
-                newNodeId("HelloWorld/DataAccess"),
-                newQualifiedName("DataAccess"),
-                LocalizedText.english("DataAccess")
-        );
-
-        getNodeManager().addNode(dataAccessFolder);
-        rootNode.addOrganizes(dataAccessFolder);
-
-        try {
-            AnalogItemTypeNode node = (AnalogItemTypeNode) getNodeFactory().createNode(
-                    newNodeId("HelloWorld/DataAccess/AnalogValue"),
-                    Identifiers.AnalogItemType,
-                    new NodeFactory.InstantiationCallback() {
-                        @Override
-                        public boolean includeOptionalNode(NodeId typeDefinitionId, QualifiedName browseName) {
-                            return true;
-                        }
-                    }
-            );
-            node.getFilterChain().addLast(new AttributeLoggingFilter());
-            node.setBrowseName(newQualifiedName("AnalogValue"));
-            node.setDisplayName(LocalizedText.english("AnalogValue"));
-            node.setDataType(Identifiers.Double);
-            node.setValue(new DataValue(new Variant(3.14d)));
-            node.setAccessLevel(UByte.MAX);
-            node.setUserAccessLevel(UByte.MAX);
-
-            node.setEURange(new Range(0.0, 100.0));
-
-            getNodeManager().addNode(node);
-            dataAccessFolder.addOrganizes(node);
-        } catch (UaException e) {
-            logger.error("Error creating AnalogItemType instance: {}", e.getMessage(), e);
         }
     }
 

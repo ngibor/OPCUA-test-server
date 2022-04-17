@@ -3,57 +3,55 @@ package cz.vutbr.feec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.File;
-import java.io.FileInputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.*;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
-import java.util.regex.Pattern;
 
 class KeyStoreLoader {
 
-    private static final Pattern IP_ADDR_PATTERN = Pattern.compile(
-            "^(([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.){3}([01]?\\d\\d?|2[0-4]\\d|25[0-5])$");
+    private static final String DEFAULT_PASSWORD = "secret";
+    private static final Logger logger = LoggerFactory.getLogger(KeyStoreLoader.class);
 
-    private static final String SERVER_ALIAS = "server";
-    private static final char[] PASSWORD = "secret".toCharArray();
+    private X509Certificate[] certificateChain;
+    private X509Certificate certificate;
+    private KeyPair keyPair;
 
-    private final Logger logger = LoggerFactory.getLogger(getClass());
+    KeyStoreLoader load(Path baseDir, String file, String alias) throws Exception {
+        return load(baseDir, file, alias, DEFAULT_PASSWORD);
+    }
 
-    private X509Certificate[] serverCertificateChain;
-    private X509Certificate serverCertificate;
-    private KeyPair serverKeyPair;
-
-    KeyStoreLoader load(Path baseDir) throws Exception {
+    KeyStoreLoader load(Path baseDir, String file, String alias, String password) throws Exception {
+        char[] pass = password.toCharArray();
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
 
-        File serverKeyStore = baseDir.resolve("keystore.pkcs12").toFile();
+        Path keystore = baseDir.resolve(file);
 
-        logger.info("Loading KeyStore at {}", serverKeyStore);
-        keyStore.load(new FileInputStream(serverKeyStore), PASSWORD);
+        logger.info("Loading KeyStore at {}", keystore);
+        keyStore.load(Files.newInputStream(keystore), pass);
 
-        Key serverPrivateKey = keyStore.getKey(SERVER_ALIAS, PASSWORD);
-        if (serverPrivateKey instanceof PrivateKey) {
-            serverCertificate = (X509Certificate) keyStore.getCertificate(SERVER_ALIAS);
-
-            serverCertificateChain = Arrays.stream(keyStore.getCertificateChain(SERVER_ALIAS))
+        Key privateKey = keyStore.getKey(alias, pass);
+        if (privateKey instanceof PrivateKey) {
+            certificate = (X509Certificate) keyStore.getCertificate(alias);
+            certificateChain = Arrays.stream(keyStore.getCertificateChain(alias))
                     .map(X509Certificate.class::cast)
                     .toArray(X509Certificate[]::new);
-
-            PublicKey serverPublicKey = serverCertificate.getPublicKey();
-            serverKeyPair = new KeyPair(serverPublicKey, (PrivateKey) serverPrivateKey);
+            PublicKey serverPublicKey = certificate.getPublicKey();
+            keyPair = new KeyPair(serverPublicKey, (PrivateKey) privateKey);
         }
-
         return this;
     }
 
-    public X509Certificate[] getServerCertificateChain() {
-        return serverCertificateChain;
+    public X509Certificate getCertificate() {
+        return certificate;
     }
 
-    KeyPair getServerKeyPair() {
-        return serverKeyPair;
+    public X509Certificate[] getCertificateChain() {
+        return certificateChain;
     }
 
+    KeyPair getKeyPair() {
+        return keyPair;
+    }
 }

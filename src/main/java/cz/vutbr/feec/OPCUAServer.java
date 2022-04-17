@@ -1,18 +1,16 @@
 package cz.vutbr.feec;
 
-import org.bouncycastle.asn1.ASN1InputStream;
-import org.bouncycastle.asn1.DERSequence;
-import org.bouncycastle.asn1.DERTaggedObject;
-import org.bouncycastle.asn1.DERUTF8String;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.eclipse.milo.opcua.sdk.client.OpcUaClient;
-import org.eclipse.milo.opcua.sdk.client.nodes.UaVariableNode;
+import org.eclipse.milo.opcua.sdk.client.api.identity.AnonymousProvider;
 import org.eclipse.milo.opcua.sdk.server.OpcUaServer;
 import org.eclipse.milo.opcua.sdk.server.api.config.OpcUaServerConfig;
 import org.eclipse.milo.opcua.sdk.server.identity.CompositeValidator;
 import org.eclipse.milo.opcua.sdk.server.identity.UsernameIdentityValidator;
 import org.eclipse.milo.opcua.sdk.server.identity.X509IdentityValidator;
 import org.eclipse.milo.opcua.sdk.server.util.HostnameUtil;
+import org.eclipse.milo.opcua.stack.client.security.ClientCertificateValidator;
+import org.eclipse.milo.opcua.stack.client.security.DefaultClientCertificateValidator;
 import org.eclipse.milo.opcua.stack.core.StatusCodes;
 import org.eclipse.milo.opcua.stack.core.UaRuntimeException;
 import org.eclipse.milo.opcua.stack.core.security.DefaultCertificateManager;
@@ -21,24 +19,20 @@ import org.eclipse.milo.opcua.stack.core.security.SecurityPolicy;
 import org.eclipse.milo.opcua.stack.core.transport.TransportProfile;
 import org.eclipse.milo.opcua.stack.core.types.builtin.*;
 import org.eclipse.milo.opcua.stack.core.types.enumerated.MessageSecurityMode;
+import org.eclipse.milo.opcua.stack.core.types.enumerated.TimestampsToReturn;
 import org.eclipse.milo.opcua.stack.core.types.structured.BuildInfo;
 import org.eclipse.milo.opcua.stack.core.types.structured.EndpointDescription;
 import org.eclipse.milo.opcua.stack.core.util.CertificateUtil;
 import org.eclipse.milo.opcua.stack.core.util.NonceUtil;
-import org.eclipse.milo.opcua.stack.core.util.SelfSignedCertificateGenerator;
-import org.eclipse.milo.opcua.stack.core.util.SelfSignedHttpsCertificateBuilder;
 import org.eclipse.milo.opcua.stack.server.EndpointConfiguration;
 import org.eclipse.milo.opcua.stack.server.security.DefaultServerCertificateValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.UnsupportedEncodingException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.KeyPair;
-import java.security.PrivateKey;
 import java.security.Security;
 import java.security.cert.X509Certificate;
 import java.text.DecimalFormat;
@@ -50,7 +44,6 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 
 import static com.google.common.collect.Lists.newArrayList;
-import static org.bouncycastle.asn1.isismtt.ocsp.RequestedCertificate.certificate;
 import static org.eclipse.milo.opcua.sdk.server.api.config.OpcUaServerConfig.*;
 import static org.eclipse.milo.opcua.stack.core.types.builtin.unsigned.Unsigned.uint;
 
@@ -60,9 +53,18 @@ public class OPCUAServer {
 
     private static final int TCP_BIND_PORT = 12686;
     private static final int HTTPS_BIND_PORT = 8443;
+    private static final String CLIENT_KEYSTORE = "client.pkcs12";
+    private static final String SERVER_KEYSTORE = "server.pkcs12";
+    private static final String CLIENT_ALIAS = "client";
+    private static final String SERVER_ALIAS = "server";
+    private static final Path CERTIFICATES_ROOT = new File(OPCUAServer.class.getClassLoader().getResource("certificates").getPath()).toPath();
+
+    private final OpcUaServer server;
+    private final TestNamespace exampleNamespace;
+    private final String applicationUri;
 
     private static Predicate<EndpointDescription> endpointFilter() {
-        return e -> SecurityPolicy.None.getUri().equals(e.getSecurityPolicyUri());
+        return e -> SecurityPolicy.Basic256Sha256.getUri().equals(e.getSecurityPolicyUri());
     }
 
     static {
@@ -84,19 +86,30 @@ public class OPCUAServer {
         final CompletableFuture<Void> future = new CompletableFuture<>();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> future.complete(null)));
 
+        KeyStoreLoader clientKeyStoreLoader = new KeyStoreLoader().load(CERTIFICATES_ROOT, CLIENT_KEYSTORE, CLIENT_ALIAS);
+
+        DefaultTrustListManager trustListManager = new DefaultTrustListManager(CERTIFICATES_ROOT.toFile());
+        DefaultClientCertificateValidator certificateValidator =
+                new DefaultClientCertificateValidator(trustListManager);
+
         // Start new client thread that will update TestNamespace.DYNAMIC_NODE_ID value to random value every 10 seconds
         new Thread(() -> {
             try {
                 OpcUaClient client = OpcUaClient.create(
                         "opc.tcp://ubuntu:12686/milo",
                         endpoints ->
-                                endpoints.stream()
+                                endpoints.stream().filter(endpointFilter())
                                         .findFirst(),
                         configBuilder ->
                                 configBuilder
                                         .setApplicationName(LocalizedText.english("Server's client"))
-                                        .setApplicationUri("urn:eclipse:milo:servers:client")
+                                        .setApplicationUri("opcua:test:client")
                                         .setRequestTimeout(uint(5000))
+                                        .setKeyPair(clientKeyStoreLoader.getKeyPair())
+                                        .setCertificate(clientKeyStoreLoader.getCertificate())
+                                        .setCertificateChain(clientKeyStoreLoader.getCertificateChain())
+                                        .setCertificateValidator(certificateValidator)
+                                        .setIdentityProvider(new AnonymousProvider())
                                         .build()
                 );
                 client.connect().get();
@@ -109,31 +122,28 @@ public class OPCUAServer {
 
                     Variant variant = new Variant(randomValue);
                     DataValue dv = new DataValue(variant, null, null);
-                    client.writeValue(new NodeId(2, TestNamespace.DYNAMIC_NODE_ID), dv);
+                    client.writeValue(new NodeId(2, TestNamespace.CHANGING_NODE), dv);
+//                    log.info("STATIC NODE VALUE: " + client.readValue(Double.MAX_VALUE, TimestampsToReturn.Both, new NodeId(2, TestNamespace.STATIC_NODE)).get().getValue());
                     Thread.sleep(10000);
                 }
             } catch (Exception e) {
-                log.error("EXCEPTION IN CLIENT THREAD:" + e.getMessage());
+                log.error("Exception raised in client thread:" + e.getMessage());
+                System.exit(1);
             }
         }).start();
 
         future.get();
     }
 
-    private final OpcUaServer server;
-    private final TestNamespace exampleNamespace;
-
     public OPCUAServer() throws Exception {
-        ClassLoader classLoader = getClass().getClassLoader();
-        File file = new File(classLoader.getResource("certificates").getPath());
-        KeyStoreLoader loader = new KeyStoreLoader().load(file.toPath());
+        KeyStoreLoader loader =  new KeyStoreLoader().load(CERTIFICATES_ROOT, SERVER_KEYSTORE, SERVER_ALIAS);
 
         DefaultCertificateManager certificateManager = new DefaultCertificateManager(
-                loader.getServerKeyPair(),
-                loader.getServerCertificateChain()
+                loader.getKeyPair(),
+                loader.getCertificateChain()
         );
 
-        DefaultTrustListManager trustListManager = new DefaultTrustListManager(file);
+        DefaultTrustListManager trustListManager = new DefaultTrustListManager(CERTIFICATES_ROOT.toFile());
         DefaultServerCertificateValidator certificateValidator =
                 new DefaultServerCertificateValidator(trustListManager);
 
@@ -143,8 +153,8 @@ public class OPCUAServer {
                     String username = authChallenge.getUsername();
                     String password = authChallenge.getPassword();
 
-                    boolean userOk = "user".equals(username) && "password1".equals(password);
-                    boolean adminOk = "admin".equals(username) && "password2".equals(password);
+                    boolean userOk = "user".equals(username) && "user".equals(password);
+                    boolean adminOk = "admin".equals(username) && "admin".equals(password);
 
                     return userOk || adminOk;
                 }
@@ -153,7 +163,7 @@ public class OPCUAServer {
         X509IdentityValidator x509IdentityValidator = new X509IdentityValidator(c -> true);
 
         // If you need to use multiple certificates you'll have to be smarter than this.
-        X509Certificate httpsCertificate = certificateManager.getCertificates()
+        X509Certificate certificate = certificateManager.getCertificates()
                 .stream()
                 .findFirst()
                 .orElseThrow(() -> new UaRuntimeException(StatusCodes.Bad_ConfigurationError, "no certificate found"));
@@ -163,53 +173,35 @@ public class OPCUAServer {
                 .findFirst()
                 .orElseThrow(() -> new UaRuntimeException(StatusCodes.Bad_ConfigurationError, "no keypair"));
 
+        applicationUri = CertificateUtil
+                .getSanUri(certificate)
+                .orElseThrow(() -> new UaRuntimeException(
+                        StatusCodes.Bad_ConfigurationError,
+                        "certificate is missing the application URI"));
 
-        String applicationUri = "";
-        Collection<List<?>> altNames = httpsCertificate.getSubjectAlternativeNames();
-        if (altNames == null) {
-            throw new UaRuntimeException(StatusCodes.Bad_ConfigurationError, "certificate is missing the application URI");
-        }
-
-        for (List item : altNames) {
-            Integer type = (Integer) item.get(0);
-            // 8.3.2.1 https://www.itu.int/rec/dologin_pub.asp?lang=e&id=T-REC-X.509-201210-S!!PDF-E&type=items
-            if (type == 2) {
-                applicationUri = ((String) item.toArray()[1]);
-            } else {
-                throw new UaRuntimeException(StatusCodes.Bad_ConfigurationError, "certificate SubjectAltName has invalid format");
-            }
-        }
-
-        Set<EndpointConfiguration> endpointConfigurations = createEndpointConfigurations(httpsCertificate);
+        Set<EndpointConfiguration> endpointConfigurations = createEndpointConfigurations(certificate);
 
         OpcUaServerConfig serverConfig = OpcUaServerConfig.builder()
                 .setApplicationUri(applicationUri)
                 .setApplicationName(LocalizedText.english("Eclipse Milo OPC UA Example Server"))
                 .setEndpoints(endpointConfigurations)
-                .setBuildInfo(
-                        new BuildInfo(
-                                "urn:eclipse:milo:example-server",
-                                "eclipse",
-                                "eclipse milo example server",
-                                OpcUaServer.SDK_VERSION,
-                                "", DateTime.now()))
                 .setCertificateManager(certificateManager)
                 .setTrustListManager(trustListManager)
                 .setCertificateValidator(certificateValidator)
                 .setHttpsKeyPair(httpsKeyPair)
-                .setHttpsCertificateChain(new X509Certificate[]{httpsCertificate})
+                .setHttpsCertificateChain(new X509Certificate[]{certificate})
                 .setIdentityValidator(new CompositeValidator(identityValidator, x509IdentityValidator))
-                .setProductUri("urn:eclipse:milo:example-server")
+                .setProductUri(applicationUri)
                 .build();
 
         server = new OpcUaServer(serverConfig);
 
-        log.info("About to add Namespace");
         exampleNamespace = new TestNamespace(server);
         exampleNamespace.startup();
     }
 
     private Set<EndpointConfiguration> createEndpointConfigurations(X509Certificate certificate) {
+
         Set<EndpointConfiguration> endpointConfigurations = new LinkedHashSet<>();
 
         List<String> bindAddresses = newArrayList();
@@ -217,8 +209,6 @@ public class OPCUAServer {
 
         Set<String> hostnames = new LinkedHashSet<>();
         hostnames.add(HostnameUtil.getHostname());
-//        hostnames.addAll(HostnameUtil.getHostnames("0.0.0.0"));
-
 
         for (String bindAddress : bindAddresses) {
             for (String hostname : hostnames) {
