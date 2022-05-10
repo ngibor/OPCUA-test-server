@@ -96,7 +96,7 @@ public class OPCUAServer {
         new Thread(() -> {
             try {
                 OpcUaClient client = OpcUaClient.create(
-                        "opc.tcp://ubuntu:12686/milo",
+                        "opc.tcp://localhost:12686/milo",
                         endpoints ->
                                 endpoints.stream().filter(endpointFilter())
                                         .findFirst(),
@@ -123,7 +123,7 @@ public class OPCUAServer {
                     Variant variant = new Variant(randomValue);
                     DataValue dv = new DataValue(variant, null, null);
                     client.writeValue(new NodeId(2, TestNamespace.CHANGING_NODE), dv);
-//                    log.info("STATIC NODE VALUE: " + client.readValue(Double.MAX_VALUE, TimestampsToReturn.Both, new NodeId(2, TestNamespace.STATIC_NODE)).get().getValue());
+                    log.info("STATIC NODE VALUE: " + client.readValue(0.0, TimestampsToReturn.Both, new NodeId(2, TestNamespace.STATIC_NODE)).get().getValue().getValue());
                     Thread.sleep(10000);
                 }
             } catch (Exception e) {
